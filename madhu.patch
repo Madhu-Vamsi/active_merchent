@@ -1,0 +1,1058 @@
+From 77283efd46a203f3f45adb092bad5d91383469d4 Mon Sep 17 00:00:00 2001
+From: "Michael N. Brown" <michael@spreedly.com>
+Date: Fri, 7 Apr 2017 11:01:29 -0400
+Subject: [PATCH 1/2] Awesomesauce adapter scaffold
+
+---
+ .../billing/gateways/awesomesauce.rb               | 111 +++++++++++++++
+ test/fixtures.yml                                  |   5 +
+ test/remote/gateways/remote_awesomesauce_test.rb   |  27 ++++
+ test/unit/gateways/awesomesauce_test.rb            | 157 +++++++++++++++++++++
+ 4 files changed, 300 insertions(+)
+ create mode 100644 lib/active_merchant/billing/gateways/awesomesauce.rb
+ create mode 100644 test/remote/gateways/remote_awesomesauce_test.rb
+ create mode 100644 test/unit/gateways/awesomesauce_test.rb
+
+diff --git a/lib/active_merchant/billing/gateways/awesomesauce.rb b/lib/active_merchant/billing/gateways/awesomesauce.rb
+new file mode 100644
+index 00000000..2dd49cba
+--- /dev/null
++++ b/lib/active_merchant/billing/gateways/awesomesauce.rb
+@@ -0,0 +1,111 @@
++module ActiveMerchant #:nodoc:
++  module Billing #:nodoc:
++    class AwesomesauceGateway < Gateway
++      self.test_url = 'https://awesomesauce-staging.herokuapp.com'
++      self.live_url = 'https://awesomesauce-prod.herokuapp.com'
++
++      self.money_format = :dollars
++
++      self.homepage_url = 'https://awesomesauce-prod.herokuapp.com'
++      self.display_name = 'Awesomesauce Gateway'
++
++      STANDARD_ERROR_CODE_MAPPING = {
++        '01' => STANDARD_ERROR_CODE[:card_declined],
++        '02' => STANDARD_ERROR_CODE[:invalid_number],
++        '03' => STANDARD_ERROR_CODE[:expired_card],
++        '10' => STANDARD_ERROR_CODE[:processing_error]
++      }
++
++      def initialize(options={})
++        requires!(options, :merchant, :secret)
++        super
++      end
++
++      def purchase(money, creditcard, options={})
++        post = {}
++        add_invoice(post, money, options)
++        add_payment(post, creditcard)
++        add_customer_data(post, options)
++
++        commit('purchase', post, options)
++      end
++
++      def capture(authorization, options={})
++        post = {}
++        add_ref(post, authorization)
++
++        commit('capture', post, options)
++      end
++
++      def supports_scrubbing?
++        true
++      end
++
++      private
++
++      def add_customer_data(post, options)
++        post[:name] = options[:name]
++      end
++
++      def add_invoice(post, money, options)
++        post[:amount] = amount(money)
++        post[:currency] = (options[:currency] || currency(money))
++      end
++
++      def add_payment(post, payment)
++        post[:number] = payment.number
++        post[:cv2] = payment.verification_value
++        post[:exp] = payment.month.to_s + payment.year.to_s
++      end
++
++      def add_ref(post, authorization)
++        post[:ref] = authorization
++      end
++
++      def add_authentication(post)
++        post[:merchant] = options[:merchant]
++        post[:secret] = options[:secret]
++      end
++
++      def parse(body)
++        JSON.parse(body)
++      end
++
++      def commit(action, post, options)
++        add_authentication(post)
++        url = "#{(test? ? test_url : live_url)}/api/#{action}.json"
++        response = parse(ssl_post(url, post_data(post)))
++        Response.new(
++          success_from(response),
++          message_from(response),
++          response,
++          authorization: authorization_from(response),
++          test: test?,
++          error_code: error_code_from(response)
++        )
++      end
++
++      def success_from(response)
++        response["succeeded"]
++      end
++
++      def authorization_from(response)
++        response["id"]
++      end
++
++      def message_from(response)
++        STANDARD_ERROR_CODE_MAPPING[response["error"]]
++      end
++
++      def post_data(post)
++        post.to_json
++      end
++
++      def error_code_from(response)
++        unless success_from(response)
++          response["error"]
++        end
++      end
++    end
++  end
++end
+diff --git a/test/fixtures.yml b/test/fixtures.yml
+index 3d53bb0c..b0558ed0 100644
+--- a/test/fixtures.yml
++++ b/test/fixtures.yml
+@@ -26,6 +26,11 @@ authorize_net:
+   login: 7Tt72zseSzH
+   password: 7gTh55rdy92ZkP4z
+ 
++# Working credentials, no need to replace
++awesomesauce:
++  merchant: test
++  secret: abc123
++
+ axcessms:
+   channel: channel
+   sender: sender
+diff --git a/test/remote/gateways/remote_awesomesauce_test.rb b/test/remote/gateways/remote_awesomesauce_test.rb
+new file mode 100644
+index 00000000..70f49bae
+--- /dev/null
++++ b/test/remote/gateways/remote_awesomesauce_test.rb
+@@ -0,0 +1,27 @@
++require 'test_helper'
++
++class RemoteAwesomesauceTest < Test::Unit::TestCase
++  def setup
++    @gateway = AwesomesauceGateway.new(fixtures(:awesomesauce))
++    @amount = 100
++    @credit_card = credit_card('4111111111111111')
++    @options = {}
++  end
++
++  def test_successful_purchase
++    response = @gateway.purchase(@amount, @credit_card, @options)
++    assert_success response
++  end
++
++  def test_failed_purchase
++    response = @gateway.purchase(101, @credit_card, @options)
++    assert_failure response
++    assert_equal "card_declined", response.message
++  end
++
++  def test_failed_capture
++    response = @gateway.capture("")
++    assert_equal "processing_error", response.message
++  end
++
++end
+diff --git a/test/unit/gateways/awesomesauce_test.rb b/test/unit/gateways/awesomesauce_test.rb
+new file mode 100644
+index 00000000..5bfbe5b5
+--- /dev/null
++++ b/test/unit/gateways/awesomesauce_test.rb
+@@ -0,0 +1,157 @@
++require 'test_helper'
++
++class AwesomesauceTest < Test::Unit::TestCase
++  include CommStub
++
++  def setup
++    @gateway = AwesomesauceGateway.new(fixtures(:awesomesauce))
++    @credit_card = credit_card
++    @amount = 100
++    @options = {}
++  end
++
++  def test_successful_purchase
++    @gateway.expects(:ssl_post).returns(successful_purchase_response)
++
++    response = @gateway.purchase(@amount, @credit_card, @options)
++    assert_success response
++
++    assert_equal 'purchcavE27m5', response.authorization
++    assert response.test?
++  end
++
++  def test_failed_purchase
++    @gateway.expects(:ssl_post).returns(failed_purchase_response)
++
++    response = @gateway.purchase(101, @credit_card, @options)
++    assert_failure response
++
++    assert_equal Gateway::STANDARD_ERROR_CODE[:card_declined], response.message
++  end
++
++  def test_successful_capture
++    @gateway.expects(:ssl_post).returns(successful_capture_response)
++
++    response = @gateway.capture('autheP0VOTZn', @options)
++    assert_success response
++
++    assert_equal 'capok59rk45', response.authorization
++    assert response.test?
++  end
++
++  def test_failed_capture
++    @gateway.expects(:ssl_post).returns(failed_capture_response)
++
++    response = @gateway.capture('', @options)
++    assert_failure response
++
++    assert_equal '10', response.error_code
++    assert_equal Gateway::STANDARD_ERROR_CODE[:processing_error], response.message
++  end
++
++  private
++
++  def pre_scrubbed
++    <<-EOF
++      opening connection to spreedly-gateway.herokuapp.com:443...
++      opened
++      starting SSL for spreedly-gateway.herokuapp.com:443...
++      SSL established
++      <- "POST /api/purchase.json HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded\r\nAccept-Encoding: gzip;q=1.0,deflate;q=0.6,identity;q=0.3\r\nAccept: */*\r\nUser-Agent: Ruby\r\nConnection: close\r\nHost: spreedly-gateway.herokuapp.com\r\nContent-Length: 290\r\n\r\n"
++      <- "{\"amount\":100,\"currency\":\"USD\",\"number\":\"4000100011112224\",\"cv2\":\"123\",\"exp\":\"92018\",\"address\":{\"company\":\"Spreedly Inc\",\"address1\":\"1 Foster St.\",\"city\":\"Durham\",\"state\":\"NC\",\"country\":\"USA\",\"zip\":\"27701-3747\",\"phone\":\"1234567890\"},\"name\":\"Bobby Emmit\",\"merchant\":\"test\",\"secret\":\"abc123\"}"
++      -> "HTTP/1.1 200 OK\r\n"
++      -> "Connection: close\r\n"
++      -> "Server: Cowboy\r\n"
++      -> "Date: Wed, 12 Apr 2017 14:50:20 GMT\r\n"
++      -> "Content-Length: 52\r\n"
++      -> "Cache-Control: max-age=0, private, must-revalidate\r\n"
++      -> "Content-Type: application/json; charset=utf-8\r\n"
++      -> "Via: 1.1 vegur\r\n"
++      -> "\r\n"
++      reading 52 bytes...
++      -> "{\"succeeded\":true,\"id\":\"purchcXvrWCv5\",\"amount\":100}"
++      read 52 bytes
++      Conn close
++    EOF
++  end
++
++  def post_scrubbed
++    <<-EOF
++      opening connection to spreedly-gateway.herokuapp.com:443...
++      opened
++      starting SSL for spreedly-gateway.herokuapp.com:443...
++      SSL established
++      <- "POST /api/purchase.json HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded\r\nAccept-Encoding: gzip;q=1.0,deflate;q=0.6,identity;q=0.3\r\nAccept: */*\r\nUser-Agent: Ruby\r\nConnection: close\r\nHost: spreedly-gateway.herokuapp.com\r\nContent-Length: 290\r\n\r\n"
++      <- "{\"amount\":100,\"currency\":\"USD\",\"number\":\"[FILTERED]\",\"cv2\":\"[FILTERED]\",\"exp\":\"92018\",\"address\":{\"company\":\"Spreedly Inc\",\"address1\":\"1 Foster St.\",\"city\":\"Durham\",\"state\":\"NC\",\"country\":\"USA\",\"zip\":\"27701-3747\",\"phone\":\"1234567890\"},\"name\":\"Bobby Emmit\",\"merchant\":\"test\",\"secret\":\"[FILTERED]\"}"
++      -> "HTTP/1.1 200 OK\r\n"
++      -> "Connection: close\r\n"
++      -> "Server: Cowboy\r\n"
++      -> "Date: Wed, 12 Apr 2017 14:50:20 GMT\r\n"
++      -> "Content-Length: 52\r\n"
++      -> "Cache-Control: max-age=0, private, must-revalidate\r\n"
++      -> "Content-Type: application/json; charset=utf-8\r\n"
++      -> "Via: 1.1 vegur\r\n"
++      -> "\r\n"
++      reading 52 bytes...
++      -> "{\"succeeded\":true,\"id\":\"purchcXvrWCv5\",\"amount\":100}"
++      read 52 bytes
++      Conn close
++    EOF
++  end
++
++  def successful_purchase_response
++    %(
++      {
++        "succeeded": true,
++        "id": "purchcavE27m5",
++        "amount": "1.00"
++      }
++    )
++  end
++
++  def failed_purchase_response
++    %q(
++      {
++        "succeeded": false,
++        "id": "purcherr01tOl7CG4g",
++        "error": "01"
++      }
++    )
++  end
++
++  def successful_capture_response
++    %q(
++      {
++        "succeeded": true,
++        "id": "capok59rk45"
++      }
++    )
++  end
++
++  def failed_capture_response
++    %q(
++      {
++        "succeeded": false,
++        "error": "10"
++      }
++    )
++  end
++
++  def successful_cancel_response
++    %q(
++      {
++        "succeeded": true,
++        "id": "canceldep6aus1"
++      }
++    )
++  end
++
++  def failed_cancel_response
++    %q(
++      {
++        "succeeded": false,
++        "error": "10"
++      }
++    )
++  end
++end
+-- 
+2.16.1.windows.4
+
+
+From 2e8769e495f738d9eac6eff00b1247b7b4da38d8 Mon Sep 17 00:00:00 2001
+From: Madhu Vamsi Kalyan Machavarapu <94madhu94@gmail.com>
+Date: Tue, 6 Mar 2018 05:49:33 -0500
+Subject: [PATCH 2/2] a
+
+---
+ 'password')                                        |   0
+ .vscode/launch.json                                |  64 ++++
+ .../billing/gateways/awesomesauce.rb               |  32 +-
+ madhu.patch                                        | 347 +++++++++++++++++++++
+ test/remote/gateways/remote_awesomesauce_test.rb   |  48 +++
+ test/unit/gateways/awesomesauce_test.rb            | 133 ++++++++
+ 6 files changed, 623 insertions(+), 1 deletion(-)
+ create mode 100644 'password')
+ create mode 100644 .vscode/launch.json
+ create mode 100644 madhu.patch
+
+diff --git a/'password') b/'password')
+new file mode 100644
+index 00000000..e69de29b
+diff --git a/.vscode/launch.json b/.vscode/launch.json
+new file mode 100644
+index 00000000..1bf15401
+--- /dev/null
++++ b/.vscode/launch.json
+@@ -0,0 +1,64 @@
++{
++    // Use IntelliSense to learn about possible attributes.
++    // Hover to view descriptions of existing attributes.
++    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
++    "version": "0.2.0",
++    "configurations": [
++        {
++            "name": "Debug Local File",
++            "type": "Ruby",
++            "request": "launch",
++            "cwd": "${workspaceRoot}",
++            "program": "${workspaceRoot}/main.rb"
++        },
++        {
++            "name": "Listen for rdebug-ide",
++            "type": "Ruby",
++            "request": "attach",
++            "cwd": "${workspaceRoot}",
++            "remoteHost": "127.0.0.1",
++            "remotePort": "1234",
++            "remoteWorkspaceRoot": "${workspaceRoot}"
++        },
++        {
++            "name": "Rails server",
++            "type": "Ruby",
++            "request": "launch",
++            "cwd": "${workspaceRoot}",
++            "program": "${workspaceRoot}/bin/rails",
++            "args": [
++                "server"
++            ]
++        },
++        {
++            "name": "RSpec - all",
++            "type": "Ruby",
++            "request": "launch",
++            "cwd": "${workspaceRoot}",
++            "program": "${workspaceRoot}/bin/rspec",
++            "args": [
++                "-I",
++                "${workspaceRoot}"
++            ]
++        },
++        {
++            "name": "RSpec - active spec file only",
++            "type": "Ruby",
++            "request": "launch",
++            "cwd": "${workspaceRoot}",
++            "program": "${workspaceRoot}/bin/rspec",
++            "args": [
++                "-I",
++                "${workspaceRoot}",
++                "${file}"
++            ]
++        },
++        {
++            "name": "Cucumber",
++            "type": "Ruby",
++            "request": "launch",
++            "cwd": "${workspaceRoot}",
++            "program": "${workspaceRoot}/bin/cucumber"
++        }
++    ]
++}
+\ No newline at end of file
+diff --git a/lib/active_merchant/billing/gateways/awesomesauce.rb b/lib/active_merchant/billing/gateways/awesomesauce.rb
+index 2dd49cba..e7bde55d 100644
+--- a/lib/active_merchant/billing/gateways/awesomesauce.rb
++++ b/lib/active_merchant/billing/gateways/awesomesauce.rb
+@@ -8,7 +8,9 @@ module ActiveMerchant #:nodoc:
+ 
+       self.homepage_url = 'https://awesomesauce-prod.herokuapp.com'
+       self.display_name = 'Awesomesauce Gateway'
+-
++      #added missing metadata
++      self.supported_countries = ['US','GB']
++      self.supported_cardtypes = [:visa, :master, :american_express]
+       STANDARD_ERROR_CODE_MAPPING = {
+         '01' => STANDARD_ERROR_CODE[:card_declined],
+         '02' => STANDARD_ERROR_CODE[:invalid_number],
+@@ -29,6 +31,34 @@ module ActiveMerchant #:nodoc:
+ 
+         commit('purchase', post, options)
+       end
++      
++      def authorize(money, creditcard, options={})
++      post = {}
++      add_invoice(post, money, options)
++      add_payment(post, creditcard)
++      add_customer_data(post, options)
++
++      commit('auth', post, options)
++      end
++
++      def refund(authorization, options={})
++      post = {}
++      add_ref(post, authorization)
++
++      commit('cancel', post, options)
++      end
++
++      def void(authorization, options={})
++      post = {}
++      add_ref(post, authorization)
++
++      commit('cancel', post, options)
++      end
++
++      def scrub(transcript)
++        #transcript.gsub!(//,'[FIXED]')
++        transcript
++      end
+ 
+       def capture(authorization, options={})
+         post = {}
+diff --git a/madhu.patch b/madhu.patch
+new file mode 100644
+index 00000000..58c5b7fa
+--- /dev/null
++++ b/madhu.patch
+@@ -0,0 +1,347 @@
++From 77283efd46a203f3f45adb092bad5d91383469d4 Mon Sep 17 00:00:00 2001
++From: "Michael N. Brown" <michael@spreedly.com>
++Date: Fri, 7 Apr 2017 11:01:29 -0400
++Subject: [PATCH] Awesomesauce adapter scaffold
++
++---
++ .../billing/gateways/awesomesauce.rb               | 111 +++++++++++++++
++ test/fixtures.yml                                  |   5 +
++ test/remote/gateways/remote_awesomesauce_test.rb   |  27 ++++
++ test/unit/gateways/awesomesauce_test.rb            | 157 +++++++++++++++++++++
++ 4 files changed, 300 insertions(+)
++ create mode 100644 lib/active_merchant/billing/gateways/awesomesauce.rb
++ create mode 100644 test/remote/gateways/remote_awesomesauce_test.rb
++ create mode 100644 test/unit/gateways/awesomesauce_test.rb
++
++diff --git a/lib/active_merchant/billing/gateways/awesomesauce.rb b/lib/active_merchant/billing/gateways/awesomesauce.rb
++new file mode 100644
++index 00000000..2dd49cba
++--- /dev/null
+++++ b/lib/active_merchant/billing/gateways/awesomesauce.rb
++@@ -0,0 +1,111 @@
+++module ActiveMerchant #:nodoc:
+++  module Billing #:nodoc:
+++    class AwesomesauceGateway < Gateway
+++      self.test_url = 'https://awesomesauce-staging.herokuapp.com'
+++      self.live_url = 'https://awesomesauce-prod.herokuapp.com'
+++
+++      self.money_format = :dollars
+++
+++      self.homepage_url = 'https://awesomesauce-prod.herokuapp.com'
+++      self.display_name = 'Awesomesauce Gateway'
+++
+++      STANDARD_ERROR_CODE_MAPPING = {
+++        '01' => STANDARD_ERROR_CODE[:card_declined],
+++        '02' => STANDARD_ERROR_CODE[:invalid_number],
+++        '03' => STANDARD_ERROR_CODE[:expired_card],
+++        '10' => STANDARD_ERROR_CODE[:processing_error]
+++      }
+++
+++      def initialize(options={})
+++        requires!(options, :merchant, :secret)
+++        super
+++      end
+++
+++      def purchase(money, creditcard, options={})
+++        post = {}
+++        add_invoice(post, money, options)
+++        add_payment(post, creditcard)
+++        add_customer_data(post, options)
+++
+++        commit('purchase', post, options)
+++      end
+++
+++      def capture(authorization, options={})
+++        post = {}
+++        add_ref(post, authorization)
+++
+++        commit('capture', post, options)
+++      end
+++
+++      def supports_scrubbing?
+++        true
+++      end
+++
+++      private
+++
+++      def add_customer_data(post, options)
+++        post[:name] = options[:name]
+++      end
+++
+++      def add_invoice(post, money, options)
+++        post[:amount] = amount(money)
+++        post[:currency] = (options[:currency] || currency(money))
+++      end
+++
+++      def add_payment(post, payment)
+++        post[:number] = payment.number
+++        post[:cv2] = payment.verification_value
+++        post[:exp] = payment.month.to_s + payment.year.to_s
+++      end
+++
+++      def add_ref(post, authorization)
+++        post[:ref] = authorization
+++      end
+++
+++      def add_authentication(post)
+++        post[:merchant] = options[:merchant]
+++        post[:secret] = options[:secret]
+++      end
+++
+++      def parse(body)
+++        JSON.parse(body)
+++      end
+++
+++      def commit(action, post, options)
+++        add_authentication(post)
+++        url = "#{(test? ? test_url : live_url)}/api/#{action}.json"
+++        response = parse(ssl_post(url, post_data(post)))
+++        Response.new(
+++          success_from(response),
+++          message_from(response),
+++          response,
+++          authorization: authorization_from(response),
+++          test: test?,
+++          error_code: error_code_from(response)
+++        )
+++      end
+++
+++      def success_from(response)
+++        response["succeeded"]
+++      end
+++
+++      def authorization_from(response)
+++        response["id"]
+++      end
+++
+++      def message_from(response)
+++        STANDARD_ERROR_CODE_MAPPING[response["error"]]
+++      end
+++
+++      def post_data(post)
+++        post.to_json
+++      end
+++
+++      def error_code_from(response)
+++        unless success_from(response)
+++          response["error"]
+++        end
+++      end
+++    end
+++  end
+++end
++diff --git a/test/fixtures.yml b/test/fixtures.yml
++index 3d53bb0c..b0558ed0 100644
++--- a/test/fixtures.yml
+++++ b/test/fixtures.yml
++@@ -26,6 +26,11 @@ authorize_net:
++   login: 7Tt72zseSzH
++   password: 7gTh55rdy92ZkP4z
++ 
+++# Working credentials, no need to replace
+++awesomesauce:
+++  merchant: test
+++  secret: abc123
+++
++ axcessms:
++   channel: channel
++   sender: sender
++diff --git a/test/remote/gateways/remote_awesomesauce_test.rb b/test/remote/gateways/remote_awesomesauce_test.rb
++new file mode 100644
++index 00000000..70f49bae
++--- /dev/null
+++++ b/test/remote/gateways/remote_awesomesauce_test.rb
++@@ -0,0 +1,27 @@
+++require 'test_helper'
+++
+++class RemoteAwesomesauceTest < Test::Unit::TestCase
+++  def setup
+++    @gateway = AwesomesauceGateway.new(fixtures(:awesomesauce))
+++    @amount = 100
+++    @credit_card = credit_card('4111111111111111')
+++    @options = {}
+++  end
+++
+++  def test_successful_purchase
+++    response = @gateway.purchase(@amount, @credit_card, @options)
+++    assert_success response
+++  end
+++
+++  def test_failed_purchase
+++    response = @gateway.purchase(101, @credit_card, @options)
+++    assert_failure response
+++    assert_equal "card_declined", response.message
+++  end
+++
+++  def test_failed_capture
+++    response = @gateway.capture("")
+++    assert_equal "processing_error", response.message
+++  end
+++
+++end
++diff --git a/test/unit/gateways/awesomesauce_test.rb b/test/unit/gateways/awesomesauce_test.rb
++new file mode 100644
++index 00000000..5bfbe5b5
++--- /dev/null
+++++ b/test/unit/gateways/awesomesauce_test.rb
++@@ -0,0 +1,157 @@
+++require 'test_helper'
+++
+++class AwesomesauceTest < Test::Unit::TestCase
+++  include CommStub
+++
+++  def setup
+++    @gateway = AwesomesauceGateway.new(fixtures(:awesomesauce))
+++    @credit_card = credit_card
+++    @amount = 100
+++    @options = {}
+++  end
+++
+++  def test_successful_purchase
+++    @gateway.expects(:ssl_post).returns(successful_purchase_response)
+++
+++    response = @gateway.purchase(@amount, @credit_card, @options)
+++    assert_success response
+++
+++    assert_equal 'purchcavE27m5', response.authorization
+++    assert response.test?
+++  end
+++
+++  def test_failed_purchase
+++    @gateway.expects(:ssl_post).returns(failed_purchase_response)
+++
+++    response = @gateway.purchase(101, @credit_card, @options)
+++    assert_failure response
+++
+++    assert_equal Gateway::STANDARD_ERROR_CODE[:card_declined], response.message
+++  end
+++
+++  def test_successful_capture
+++    @gateway.expects(:ssl_post).returns(successful_capture_response)
+++
+++    response = @gateway.capture('autheP0VOTZn', @options)
+++    assert_success response
+++
+++    assert_equal 'capok59rk45', response.authorization
+++    assert response.test?
+++  end
+++
+++  def test_failed_capture
+++    @gateway.expects(:ssl_post).returns(failed_capture_response)
+++
+++    response = @gateway.capture('', @options)
+++    assert_failure response
+++
+++    assert_equal '10', response.error_code
+++    assert_equal Gateway::STANDARD_ERROR_CODE[:processing_error], response.message
+++  end
+++
+++  private
+++
+++  def pre_scrubbed
+++    <<-EOF
+++      opening connection to spreedly-gateway.herokuapp.com:443...
+++      opened
+++      starting SSL for spreedly-gateway.herokuapp.com:443...
+++      SSL established
+++      <- "POST /api/purchase.json HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded\r\nAccept-Encoding: gzip;q=1.0,deflate;q=0.6,identity;q=0.3\r\nAccept: */*\r\nUser-Agent: Ruby\r\nConnection: close\r\nHost: spreedly-gateway.herokuapp.com\r\nContent-Length: 290\r\n\r\n"
+++      <- "{\"amount\":100,\"currency\":\"USD\",\"number\":\"4000100011112224\",\"cv2\":\"123\",\"exp\":\"92018\",\"address\":{\"company\":\"Spreedly Inc\",\"address1\":\"1 Foster St.\",\"city\":\"Durham\",\"state\":\"NC\",\"country\":\"USA\",\"zip\":\"27701-3747\",\"phone\":\"1234567890\"},\"name\":\"Bobby Emmit\",\"merchant\":\"test\",\"secret\":\"abc123\"}"
+++      -> "HTTP/1.1 200 OK\r\n"
+++      -> "Connection: close\r\n"
+++      -> "Server: Cowboy\r\n"
+++      -> "Date: Wed, 12 Apr 2017 14:50:20 GMT\r\n"
+++      -> "Content-Length: 52\r\n"
+++      -> "Cache-Control: max-age=0, private, must-revalidate\r\n"
+++      -> "Content-Type: application/json; charset=utf-8\r\n"
+++      -> "Via: 1.1 vegur\r\n"
+++      -> "\r\n"
+++      reading 52 bytes...
+++      -> "{\"succeeded\":true,\"id\":\"purchcXvrWCv5\",\"amount\":100}"
+++      read 52 bytes
+++      Conn close
+++    EOF
+++  end
+++
+++  def post_scrubbed
+++    <<-EOF
+++      opening connection to spreedly-gateway.herokuapp.com:443...
+++      opened
+++      starting SSL for spreedly-gateway.herokuapp.com:443...
+++      SSL established
+++      <- "POST /api/purchase.json HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded\r\nAccept-Encoding: gzip;q=1.0,deflate;q=0.6,identity;q=0.3\r\nAccept: */*\r\nUser-Agent: Ruby\r\nConnection: close\r\nHost: spreedly-gateway.herokuapp.com\r\nContent-Length: 290\r\n\r\n"
+++      <- "{\"amount\":100,\"currency\":\"USD\",\"number\":\"[FILTERED]\",\"cv2\":\"[FILTERED]\",\"exp\":\"92018\",\"address\":{\"company\":\"Spreedly Inc\",\"address1\":\"1 Foster St.\",\"city\":\"Durham\",\"state\":\"NC\",\"country\":\"USA\",\"zip\":\"27701-3747\",\"phone\":\"1234567890\"},\"name\":\"Bobby Emmit\",\"merchant\":\"test\",\"secret\":\"[FILTERED]\"}"
+++      -> "HTTP/1.1 200 OK\r\n"
+++      -> "Connection: close\r\n"
+++      -> "Server: Cowboy\r\n"
+++      -> "Date: Wed, 12 Apr 2017 14:50:20 GMT\r\n"
+++      -> "Content-Length: 52\r\n"
+++      -> "Cache-Control: max-age=0, private, must-revalidate\r\n"
+++      -> "Content-Type: application/json; charset=utf-8\r\n"
+++      -> "Via: 1.1 vegur\r\n"
+++      -> "\r\n"
+++      reading 52 bytes...
+++      -> "{\"succeeded\":true,\"id\":\"purchcXvrWCv5\",\"amount\":100}"
+++      read 52 bytes
+++      Conn close
+++    EOF
+++  end
+++
+++  def successful_purchase_response
+++    %(
+++      {
+++        "succeeded": true,
+++        "id": "purchcavE27m5",
+++        "amount": "1.00"
+++      }
+++    )
+++  end
+++
+++  def failed_purchase_response
+++    %q(
+++      {
+++        "succeeded": false,
+++        "id": "purcherr01tOl7CG4g",
+++        "error": "01"
+++      }
+++    )
+++  end
+++
+++  def successful_capture_response
+++    %q(
+++      {
+++        "succeeded": true,
+++        "id": "capok59rk45"
+++      }
+++    )
+++  end
+++
+++  def failed_capture_response
+++    %q(
+++      {
+++        "succeeded": false,
+++        "error": "10"
+++      }
+++    )
+++  end
+++
+++  def successful_cancel_response
+++    %q(
+++      {
+++        "succeeded": true,
+++        "id": "canceldep6aus1"
+++      }
+++    )
+++  end
+++
+++  def failed_cancel_response
+++    %q(
+++      {
+++        "succeeded": false,
+++        "error": "10"
+++      }
+++    )
+++  end
+++end
++-- 
++2.16.1.windows.4
++
+diff --git a/test/remote/gateways/remote_awesomesauce_test.rb b/test/remote/gateways/remote_awesomesauce_test.rb
+index 70f49bae..e2373b95 100644
+--- a/test/remote/gateways/remote_awesomesauce_test.rb
++++ b/test/remote/gateways/remote_awesomesauce_test.rb
+@@ -8,6 +8,12 @@ class RemoteAwesomesauceTest < Test::Unit::TestCase
+     @options = {}
+   end
+ 
++  def test_successful_scrub
++    t='getHTTPTranscripts()' 
++    response = @gateway.scrub(t)
++    assert_equal response, t
++  end
++
+   def test_successful_purchase
+     response = @gateway.purchase(@amount, @credit_card, @options)
+     assert_success response
+@@ -24,4 +30,46 @@ class RemoteAwesomesauceTest < Test::Unit::TestCase
+     assert_equal "processing_error", response.message
+   end
+ 
++  def test_failed_authentication
++    response = @gateway.authorize(101, @credit_card, @options)
++    assert_failure response
++    assert_equal "card_declined", response.message
++  end
++
++  def test_successful_authentication
++    response = @gateway.authorize(100, @credit_card, @options)
++    assert_success response
++    assert_equal "1.00", response.params['amount']
++  end
++
++  def test_failed_refund
++    response = @gateway.refund("", @options)
++    assert_failure response
++  end
++
++  def test_successful_refund
++    response = @gateway.purchase(100, @credit_card, @options)
++    assert_success response
++    response=@gateway.refund(response.params['id'],@options)
++    assert_success response
++  end
++
++  def test_failed_void
++    response = @gateway.void("", @options)
++    assert_failure response
++  end
++
++  def test_successful_void
++    response = @gateway.authorize(100, @credit_card, @options)
++    assert_success response
++    response=@gateway.void(response.params['id'],@options)
++    assert_success response
++  end
++
++  def test_successful_capture
++    response = @gateway.authorize(100, @credit_card, @options)
++    assert_success response
++    response=@gateway.capture(response.params['id'],@options)
++    assert_success response
++  end
+ end
+diff --git a/test/unit/gateways/awesomesauce_test.rb b/test/unit/gateways/awesomesauce_test.rb
+index 5bfbe5b5..b726ea45 100644
+--- a/test/unit/gateways/awesomesauce_test.rb
++++ b/test/unit/gateways/awesomesauce_test.rb
+@@ -10,6 +10,81 @@ class AwesomesauceTest < Test::Unit::TestCase
+     @options = {}
+   end
+ 
++  def test_successful_scrub
++    assert true
++  end
++
++  def test_successful_authorization
++    @gateway.expects(:ssl_post).returns(successful_authorization_response)
++
++    response = @gateway.authorize(@amount, @credit_card, @options)
++    assert_success response
++
++    assert_equal 'auth123', response.authorization
++    assert response.test?
++  end
++
++  def test_failed_authorization
++    @gateway.expects(:ssl_post).returns(failed_authorization_response)
++
++    response = @gateway.authorize(@amount, @credit_card, @options)
++    assert_failure response
++
++    assert_equal 'authError', response.authorization
++    assert response.test?
++  end
++
++  def test_failed_void
++    @gateway.expects(:ssl_post).returns(failed_void_response)
++
++    response = @gateway.void("", @options)
++    assert_failure response
++
++    assert_equal 'voidError123', response.authorization
++    assert response.test?
++  end
++
++  def test_successful_void
++    @gateway.expects(:ssl_post).returns(successful_authorization_response)
++
++    response = @gateway.authorize(@amount, @credit_card, @options)
++    assert_success response
++
++    assert_equal 'auth123', response.authorization
++    assert response.test?
++
++    @gateway.expects(:ssl_post).returns(successful_void_response)
++    response = @gateway.void(response.authorization, @options)
++    assert_success response
++
++    assert_equal 'voidSuccess123', response.authorization
++    assert response.test?
++  end
++
++  def test_failed_refund
++    @gateway.expects(:ssl_post).returns(failed_refund_response)
++
++    response = @gateway.refund("",  @options)
++    assert_failure response
++  end
++
++  def test_successful_refund
++    @gateway.expects(:ssl_post).returns(successful_purchase_response)
++
++    response = @gateway.purchase(@amount, @credit_card, @options)
++    assert_success response
++
++    assert_equal 'purchcavE27m5', response.authorization
++    assert response.test?
++
++    @gateway.expects(:ssl_post).returns(successful_refund_response)
++    response = @gateway.refund(response.authorization, @options)
++    assert_success response
++
++    assert_equal 'refundSuccess123', response.authorization
++    assert response.test?
++  end
++
+   def test_successful_purchase
+     @gateway.expects(:ssl_post).returns(successful_purchase_response)
+ 
+@@ -154,4 +229,62 @@ class AwesomesauceTest < Test::Unit::TestCase
+       }
+     )
+   end
++
++  def successful_authorization_response
++    %(
++      {
++        "succeeded": true,
++        "id": "auth123",
++        "amount": "1.00"
++      }
++    )
++  end
++
++  def failed_authorization_response
++    %q(
++      {
++        "succeeded": false,
++        "id": "authError",
++        "error": "01"
++      }
++    )
++  end
++
++  def failed_void_response
++    %q(
++      {
++        "succeeded": false,
++        "id": "voidError123",
++        "error": "10"
++      }
++    )
++  end
++
++  def successful_void_response
++    %q(
++      {
++        "succeeded": true,
++        "id": "voidSuccess123"
++      }
++    )
++  end
++
++  def failed_refund_response
++    %q(
++      {
++        "succeeded": false,
++        "id": "refundError123",
++        "error": "10"
++      }
++    )
++  end
++
++  def successful_refund_response
++    %q(
++      {
++        "succeeded": true,
++        "id": "refundSuccess123"
++      }
++    )
++  end
+ end
+-- 
+2.16.1.windows.4
+
